@@ -32,6 +32,7 @@ flags.DEFINE_string('model', 'graphsage_mean', 'model names. See README for poss
 flags.DEFINE_float('learning_rate', 0.01, 'initial learning rate.')
 flags.DEFINE_string("model_size", "small", "Can be big or small; model specific def'ns")
 flags.DEFINE_string('train_prefix', '', 'prefix identifying training data. must be specified.')
+flags.DEFINE_string('model_prefix', '', 'model idx.')
 
 # left to default values in main experiments 
 flags.DEFINE_integer('epochs', 10, 'number of epochs to train.')
@@ -79,7 +80,7 @@ def evaluate(sess, model, minibatch_iter, size=None):
     return node_outs_val[1], mic, mac, (time.time() - t_test)
 
 def log_dir():
-    log_dir = FLAGS.base_log_dir + "/sup-" + FLAGS.train_prefix.split("/")[-2]
+    log_dir = FLAGS.base_log_dir + "/sup-" + FLAGS.train_prefix.split("/")[-2] + '-' + FLAGS.model_prefix
     log_dir += "/{model:s}_{model_size:s}_{lr:0.4f}/".format(
             model=FLAGS.model,
             model_size=FLAGS.model_size,
@@ -146,7 +147,7 @@ def train(train_data, test_data=None):
             context_pairs = context_pairs)
     adj_info_ph = tf.placeholder(tf.int32, shape=minibatch.adj.shape)
     adj_info = tf.Variable(adj_info_ph, trainable=False, name="adj_info")
-
+    
     if FLAGS.model == 'graphsage_mean':
         # Create model
         sampler = UniformNeighborSampler(adj_info)
@@ -159,7 +160,13 @@ def train(train_data, test_data=None):
                                 SAGEInfo("node", sampler, FLAGS.samples_2, FLAGS.dim_2)]
         else:
             layer_infos = [SAGEInfo("node", sampler, FLAGS.samples_1, FLAGS.dim_1)]
-
+        '''        
+        ### 3 layer test
+        layer_infos = [SAGEInfo("node", sampler, 50, FLAGS.dim_2),
+                                SAGEInfo("node", sampler, 25, FLAGS.dim_2),
+                                SAGEInfo("node", sampler, 10, FLAGS.dim_2)]
+ 
+        '''
         model = SupervisedGraphsage(num_classes, placeholders, 
                                      features,
                                      adj_info,
@@ -247,7 +254,14 @@ def train(train_data, test_data=None):
     sess = tf.Session(config=config)
     merged = tf.summary.merge_all()
     summary_writer = tf.summary.FileWriter(log_dir(), sess.graph)
-     
+    
+    # Save model
+    saver = tf.train.Saver()
+    model_path =  './model/' + FLAGS.train_prefix.split('/')[-1] + '-' + FLAGS.model_prefix + '/'
+    if not os.path.exists(model_path):
+        os.makedirs(model_path)
+
+
     # Init variables
     sess.run(tf.global_variables_initializer(), feed_dict={adj_info_ph: minibatch.adj})
     
@@ -259,6 +273,13 @@ def train(train_data, test_data=None):
 
     train_adj_info = tf.assign(adj_info, minibatch.adj)
     val_adj_info = tf.assign(adj_info, minibatch.test_adj)
+    
+    
+    val_cost_ = []
+    val_f1_mic_ = []
+    val_f1_mac_ = []
+    duration_ = []
+    
     for epoch in range(FLAGS.epochs): 
         minibatch.shuffle() 
 
@@ -282,8 +303,17 @@ def train(train_data, test_data=None):
                     val_cost, val_f1_mic, val_f1_mac, duration = incremental_evaluate(sess, model, minibatch, FLAGS.batch_size)
                 else:
                     val_cost, val_f1_mic, val_f1_mac, duration = evaluate(sess, model, minibatch, FLAGS.validate_batch_size)
+                
+                # accumulate val results
+                val_cost_.append(val_cost)
+                val_f1_mic_.append(val_f1_mic)
+                val_f1_mac_.append(val_f1_mac)
+                duration_.append(duration)
+
+                #
                 sess.run(train_adj_info.op)
                 epoch_val_costs[-1] += val_cost
+
 
             if total_steps % FLAGS.print_every == 0:
                 summary_writer.add_summary(outs[0], total_steps)
@@ -310,25 +340,73 @@ def train(train_data, test_data=None):
 
         if total_steps > FLAGS.max_total_steps:
                 break
+        
+    
+        # Save model
+        save_path = saver.save(sess, model_path+'model.ckpt')
+        print ('model is saved at %s'%save_path)
+    
+
+    print("Validation per epoch in training")
+    for ep in range(FLAGS.epochs):
+        print("Epoch: %04d"%ep, " val_cost={:.5f}".format(val_cost_[ep]), " val_f1_mic={:.5f}".format(val_f1_mic_[ep]), " val_f1_mac={:.5f}".format(val_f1_mac_[ep]), " duration={:.5f}".format(duration_[ep]))
     
     print("Optimization Finished!")
     sess.run(val_adj_info.op)
-    val_cost, val_f1_mic, val_f1_mac, duration = incremental_evaluate(sess, model, minibatch, FLAGS.batch_size)
-    print("Full validation stats:",
-                  "loss=", "{:.5f}".format(val_cost),
-                  "f1_micro=", "{:.5f}".format(val_f1_mic),
-                  "f1_macro=", "{:.5f}".format(val_f1_mac),
-                  "time=", "{:.5f}".format(duration))
+
+    # full validation 
+    val_cost_ = []
+    val_f1_mic_ = []
+    val_f1_mac_ = []
+    duration_ = []
+    for iter in range(10):
+        val_cost, val_f1_mic, val_f1_mac, duration = incremental_evaluate(sess, model, minibatch, FLAGS.batch_size)
+        print("Full validation stats:",
+                          "loss=", "{:.5f}".format(val_cost),
+                          "f1_micro=", "{:.5f}".format(val_f1_mic),
+                          "f1_macro=", "{:.5f}".format(val_f1_mac),
+                          "time=", "{:.5f}".format(duration))
+
+        val_cost_.append(val_cost)
+        val_f1_mic_.append(val_f1_mic)
+        val_f1_mac_.append(val_f1_mac)
+        duration_.append(duration)
+  
+    # write validation results
     with open(log_dir() + "val_stats.txt", "w") as fp:
-        fp.write("loss={:.5f} f1_micro={:.5f} f1_macro={:.5f} time={:.5f}".
-                format(val_cost, val_f1_mic, val_f1_mac, duration))
+        for iter in range(10):
+            fp.write("loss={:.5f} f1_micro={:.5f} f1_macro={:.5f} time={:.5f}\n".format(val_cost_[iter], val_f1_mic_[iter], val_f1_mac_[iter], duration_[iter]))
+        
+        fp.write("mean: loss={:.5f} f1_micro={:.5f} f1_macro={:.5f} time={:.5f}\n".format(np.mean(val_cost_), np.mean(val_f1_mic_), np.mean(val_f1_mac_), np.mean(duration_)))
+        fp.write("variance: loss={:.5f} f1_micro={:.5f} f1_macro={:.5f} time={:.5f}\n".format(np.var(val_cost_), np.var(val_f1_mic_), np.var(val_f1_mac_), np.var(duration_)))
+        
+
+    # test 
+    val_cost_ = []
+    val_f1_mic_ = []
+    val_f1_mac_ = []
+    duration_ = []
 
     print("Writing test set stats to file (don't peak!)")
-    val_cost, val_f1_mic, val_f1_mac, duration = incremental_evaluate(sess, model, minibatch, FLAGS.batch_size, test=True)
+    for iter in range(10):
+        val_cost, val_f1_mic, val_f1_mac, duration = incremental_evaluate(sess, model, minibatch, FLAGS.batch_size, test=True)
+    
+        val_cost_.append(val_cost)
+        val_f1_mic_.append(val_f1_mic)
+        val_f1_mac_.append(val_f1_mac)
+        duration_.append(duration)
+   
+    # write test results
     with open(log_dir() + "test_stats.txt", "w") as fp:
-        fp.write("loss={:.5f} f1_micro={:.5f} f1_macro={:.5f}".
-                format(val_cost, val_f1_mic, val_f1_mac))
-
+        for iter in range(10):
+            fp.write("loss={:.5f} f1_micro={:.5f} f1_macro={:.5f} time={:.5f}\n".
+                        format(val_cost_[iter], val_f1_mic_[iter], val_f1_mac_[iter], duration_[iter]))
+        
+        fp.write("mean: loss={:.5f} f1_micro={:.5f} f1_macro={:.5f} time={:.5f}\n".
+                        format(np.mean(val_cost_), np.mean(val_f1_mic_), np.mean(val_f1_mac_), np.mean(duration_)))
+        fp.write("variance: loss={:.5f} f1_micro={:.5f} f1_macro={:.5f} time={:.5f}\n".
+                        format(np.var(val_cost_), np.var(val_f1_mic_), np.var(val_f1_mac_), np.var(duration_)))
+        
 def main(argv=None):
     print("Loading training data..")
     train_data = load_data(FLAGS.train_prefix)
