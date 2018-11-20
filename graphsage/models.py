@@ -12,6 +12,8 @@ from .aggregators import MeanAggregator, MaxPoolingAggregator, MeanPoolingAggreg
 flags = tf.app.flags
 FLAGS = flags.FLAGS
 
+import pdb
+
 # DISCLAIMER:
 # Boilerplate parts of this code file were originally forked from
 # https://github.com/tkipf/gcn
@@ -92,6 +94,7 @@ class Model(object):
         save_path = "tmp/%s.ckpt" % self.name
         saver.restore(sess, save_path)
         print("Model restored from file: %s" % save_path)
+
 
 
 class MLP(Model):
@@ -225,7 +228,6 @@ class SampleAndAggregate(GeneralizedModel):
         self.inputs1 = placeholders["batch1"]
         self.inputs2 = placeholders["batch2"]
         self.model_size = model_size
-        self.adj_info = adj
         if identity_dim > 0:
            self.embeds = tf.get_variable("node_embeddings", [adj.get_shape().as_list()[0], identity_dim])
         else:
@@ -243,7 +245,8 @@ class SampleAndAggregate(GeneralizedModel):
 
         self.dims = [(0 if features is None else features.shape[1]) + identity_dim]
         self.dims.extend([layer_infos[i].output_dim for i in range(len(layer_infos))])
-        self.batch_size = placeholders["batch_size"]
+        #self.batch_size = placeholders["batch_size"]
+        self.batch_size = FLAGS.batch_size
         self.placeholders = placeholders
         self.layer_infos = layer_infos
 
@@ -262,6 +265,7 @@ class SampleAndAggregate(GeneralizedModel):
         if batch_size is None:
             batch_size = self.batch_size
         samples = [inputs]
+        losses = []
         # size of convolution support at each layer per node
         support_size = 1
         support_sizes = [support_size]
@@ -269,7 +273,9 @@ class SampleAndAggregate(GeneralizedModel):
             t = len(layer_infos) - k - 1
             support_size *= layer_infos[t].num_samples
             sampler = layer_infos[t].neigh_sampler
+
             node = sampler((samples[k], layer_infos[t].num_samples))
+
             samples.append(tf.reshape(node, [support_size * batch_size,]))
             support_sizes.append(support_size)
         return samples, support_sizes
@@ -282,6 +288,7 @@ class SampleAndAggregate(GeneralizedModel):
         Args:
             samples: a list of samples of variable hops away for convolving at each layer of the
                 network. Length is the number of layers + 1. Each is a vector of node indices.
+            M
             input_features: the input features for each sample of various hops away.
             dims: a list of dimensions of the hidden representations from the input layer to the
                 final layer. Length is the number of layers + 1.
